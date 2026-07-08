@@ -116,6 +116,14 @@
   .keybar-status{font-size:11px; font-family:'IBM Plex Mono',monospace; white-space:nowrap;}
   .keybar-status.set{color:var(--low);}
   .keybar-status.unset{color:var(--text-faint);}
+  .citecheck{border-left:2px solid var(--line-strong); padding:8px 0 8px 14px; margin-bottom:8px;}
+  .citecheck.status-confirmed{border-left-color:var(--low);}
+  .citecheck.status-unconfirmed{border-left-color:var(--med);}
+  .citecheck.status-contradicted{border-left-color:var(--crit);}
+  .citecheck-head{display:flex; justify-content:space-between; align-items:baseline; gap:8px;}
+  .citecheck-head b{font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--accent);}
+  .sources-line{font-size:10px; color:var(--text-faint); margin-top:4px;}
+  .sources-line a{color:var(--text-faint);}
 </style>
 </head>
 <body>
@@ -454,14 +462,17 @@ Rate each of these options' insurability for Zurich.`;
 function buildCriticSystemPrompt(payload){
   const context = jurisdictionContext[payload.jurisdiction];
   const nfpaHint = systemNfpaMap[payload.system] || "the NFPA standard(s) that govern this system.";
-  return `You are a second, independent fire protection code reviewer performing a skeptical consistency check on another consultant's deviation analysis. You are NOT redoing the analysis -- your only job is to catch problems in what they already produced.
+  return `You are a second, independent fire protection code reviewer performing a skeptical consistency check on another consultant's deviation analysis. You are NOT redoing the analysis -- your job is to catch problems in what they already produced, and unlike the first consultant, you have web search available and MUST use it.
 
 Local regulatory framework in play: ${context}
 
 For this system ("${payload.system}" / "${payload.subsystem}"), the governing standards are typically: ${nfpaHint}
 
-Check specifically for:
-- Code or standard section references that sound suspiciously specific but may not actually exist, or that don't match the governing standards above
+MANDATORY FIRST STEP -- verify citations with web search:
+Before you write any part of your JSON answer, use the web_search tool to check every distinct code/standard reference the first consultant cited (e.g. "NFPA 72 Chapter 17", "SBC 801 section X"). For each one, search for the standard and section to confirm: (a) that section actually exists in that standard, and (b) that its subject matter plausibly matches what the consultant claims it requires. Do a separate, specific search per distinct reference rather than one generic search. If a reference is vague (e.g. just "NFPA 72" with no section), search for what the correct/current chapter should be for the specific requirement described, so you can say whether the consultant's generality is itself a problem.
+
+After searching, check for:
+- Code or standard section references that don't exist, don't match what search results describe, or are cited too vaguely to be checked at all
 - Residual likelihood/consequence numbers that don't make logical sense relative to the proposed fix
 - A mitigation option labeled "code_required_fix" that actually sounds like engineering judgment, or vice versa
 - A performance_based_alternative presented as low-risk without real justification
@@ -470,10 +481,17 @@ Check specifically for:
 
 Do not flag stylistic issues and do not restate the analysis approvingly. If you find nothing concerning, return an empty flags array -- do not invent minor flags just to have something to say.
 
-Respond with ONLY a raw JSON object -- no markdown fences, no preamble -- matching exactly this schema:
+Once your searches are done, your FINAL message must contain ONLY a raw JSON object -- no markdown fences, no preamble, no text before or after it, no commentary about what you searched -- matching exactly this schema:
 
 {
   "confidence": "high" or "medium" or "low",
+  "citation_checks": [
+    {
+      "reference": string (the exact code/section reference as cited by the first consultant, or "not specified" if none was given for an option that needed one),
+      "status": "confirmed" or "unconfirmed" or "contradicted",
+      "note": string (max 20 words, state what the search found or failed to find)
+    }
+  ],
   "flags": [
     {
       "target": string (must exactly match one of the mitigation option names given to you, or "overall" for a general/summary-level concern),
@@ -486,12 +504,13 @@ Respond with ONLY a raw JSON object -- no markdown fences, no preamble -- matchi
 }
 
 STRICT LENGTH LIMITS:
+- citation_checks: one entry per distinct code reference actually cited (skip duplicates)
 - max 4 flags, only include ones that matter
 - issue: max 12 words
-- note: max 25 words
+- note fields: max 25 words
 - summary: max 25 words, and should state directly whether the analysis looks sound -- not a generic hedge
 
-Never reproduce verbatim code text. Output compact JSON with no extra whitespace or line breaks between fields.`;
+Never reproduce verbatim code text, even from search results -- paraphrase only. Output compact JSON with no extra whitespace or line breaks between fields.`;
 }
 
 function buildCriticUserMsg(payload, fireResult){
@@ -520,7 +539,7 @@ ${optionsText}
 Fire consultant's recommendation: ${fireResult.recommendation}
 Fire consultant's verification note: ${fireResult.verification_note || '(none given)'}
 
-Review this analysis for the issues described in your instructions.`;
+Search to verify each code reference above, then review this analysis for the issues described in your instructions.`;
 }
 
 function repairTruncatedJson(text){
@@ -545,9 +564,13 @@ function repairTruncatedJson(text){
   return s;
 }
 
-async function requestConsultant(systemPromptBase, userMsg, extraStrict, model){
+async function requestConsultant(systemPromptBase, userMsg, extraStrict, model, tools){
   const systemPrompt = systemPromptBase + (extraStrict ? "\n\nYour previous attempt was too long and got cut off. Be even more terse this time -- half the word counts above." : "");
   const messages = [{role:"user", content: userMsg}];
+  const maxTokens = tools ? 4000 : 2000;
+
+  const requestBody = {model:model, max_tokens:maxTokens, system:systemPrompt, messages};
+  if(tools) requestBody.tools = tools;
 
   let response;
   if(sessionApiKey){
@@ -559,13 +582,13 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict, model){
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true"
       },
-      body: JSON.stringify({model:model, max_tokens:2000, system:systemPrompt, messages})
+      body: JSON.stringify(requestBody)
     });
   }else{
     response = await fetch("/api/consultant", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({system:systemPrompt, messages, max_tokens:2000, model:model})
+      body: JSON.stringify(requestBody)
     }).catch(()=>{
       throw new Error("No API key set, and no server-side proxy available. Enter your Anthropic API key above.");
     });
@@ -576,7 +599,8 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict, model){
     throw new Error(`API error ${response.status}: ${errBody.slice(0,200)}`);
   }
   const data = await response.json();
-  const textBlock = (data.content || []).find(b=>b.type==='text');
+  const textBlocks = (data.content || []).filter(b=>b.type==='text');
+  const textBlock = textBlocks[textBlocks.length-1];
   if(!textBlock) throw new Error("No response from consultant agent.");
   let clean = textBlock.text.trim().replace(/^```json/,'').replace(/^```/,'').replace(/```$/,'').trim();
   const truncated = data.stop_reason === 'max_tokens';
@@ -586,14 +610,15 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict, model){
 const FIRE_CONSULTANT_MODEL = "claude-opus-4-8";
 const INSURANCE_CONSULTANT_MODEL = "claude-sonnet-5";
 const CRITIC_MODEL = "claude-haiku-4-5-20251001";
+const CRITIC_SEARCH_TOOLS = [{type:"web_search_20250305", name:"web_search", max_uses:6}];
 
-async function callConsultant(systemPromptBase, userMsg, model){
-  let {clean, truncated} = await requestConsultant(systemPromptBase, userMsg, false, model);
+async function callConsultant(systemPromptBase, userMsg, model, tools){
+  let {clean, truncated} = await requestConsultant(systemPromptBase, userMsg, false, model, tools);
   try{
     return JSON.parse(clean);
   }catch(e){
     if(truncated){
-      const retry = await requestConsultant(systemPromptBase, userMsg, true, model);
+      const retry = await requestConsultant(systemPromptBase, userMsg, true, model, tools);
       try{
         return JSON.parse(retry.clean);
       }catch(e2){
@@ -657,8 +682,8 @@ function renderResults(payload, result){
       ${result.verification_note ? `<div class="verify"><b>Verify with AHJ:</b> ${escapeHtml(result.verification_note)}</div>` : ''}
     </div>
     <div class="card" id="criticCard">
-      <h3>Consistency check <span style="color:var(--text-faint); font-weight:400; text-transform:none; letter-spacing:0;">&middot; independent second pass</span></h3>
-      <div id="criticResults"><div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Running independent consistency check...</div></div>
+      <h3>Consistency check <span style="color:var(--text-faint); font-weight:400; text-transform:none; letter-spacing:0;">&middot; independent second pass, web-search verified</span></h3>
+      <div id="criticResults"><div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Searching to verify cited code references...</div></div>
     </div>
     <div class="card" id="insuranceCard">
       <h3>Insurance risk rating</h3>
@@ -693,7 +718,8 @@ async function runCritic(payload, fireResult){
     const critique = await callConsultant(
       buildCriticSystemPrompt(payload),
       buildCriticUserMsg(payload, fireResult),
-      CRITIC_MODEL
+      CRITIC_MODEL,
+      CRITIC_SEARCH_TOOLS
     );
     renderCriticResults(critique);
   }catch(err){
@@ -707,10 +733,29 @@ async function runCritic(payload, fireResult){
   }
 }
 
+function citeStatusLabel(status){
+  if(status==='confirmed') return 'Confirmed';
+  if(status==='contradicted') return 'Contradicted';
+  return 'Unconfirmed';
+}
+
 function renderCriticResults(critique){
   if(!Array.isArray(critique.flags)) critique.flags = [];
+  if(!Array.isArray(critique.citation_checks)) critique.citation_checks = [];
   const sevBadge = s => s==='high' ? 'tag-crit' : s==='medium' ? 'tag-high' : 'tag-med';
   const sevLabel = s => s==='high' ? 'High concern' : s==='medium' ? 'Medium concern' : 'Low concern';
+
+  let citeHtml;
+  if(critique.citation_checks.length===0){
+    citeHtml = `<div class="hint">No distinct code references were checked.</div>`;
+  }else{
+    citeHtml = critique.citation_checks.map(c=>`
+      <div class="citecheck status-${escapeHtml(c.status)}">
+        <div class="citecheck-head"><b>${escapeHtml(c.reference)}</b><span class="risk-tag ${badgeClass(c.status==='confirmed'?'low':c.status==='contradicted'?'crit':'med')}">${citeStatusLabel(c.status)}</span></div>
+        <p style="margin:4px 0 0; font-size:12px; color:var(--text-dim);">${escapeHtml(c.note)}</p>
+      </div>
+    `).join('');
+  }
 
   let flagsHtml;
   if(critique.flags.length===0){
@@ -726,12 +771,17 @@ function renderCriticResults(critique){
 
   document.getElementById('criticResults').innerHTML = `
     <p style="color:var(--text-dim); font-size:12px;">${escapeHtml(critique.summary)}</p>
+    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-faint); margin:10px 0 6px;">Code reference checks</div>
+    ${citeHtml}
+    <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-faint); margin:14px 0 6px;">Flags</div>
     ${flagsHtml}
   `;
 
   if(register.length){
     const last = register[register.length-1];
-    if(critique.flags.length===0){
+    const hasContradicted = critique.citation_checks.some(c=>c.status==='contradicted');
+    const hasUnconfirmed = critique.citation_checks.some(c=>c.status==='unconfirmed');
+    if(critique.flags.length===0 && !hasContradicted && !hasUnconfirmed){
       last.critiqueLabel = 'Clean';
       last.critiqueKey = 'low';
     }else{
@@ -739,8 +789,15 @@ function renderCriticResults(critique){
         const rank = {low:1, medium:2, high:3};
         return rank[f.severity] > rank[acc] ? f.severity : acc;
       }, 'low');
-      last.critiqueLabel = `${critique.flags.length} flag${critique.flags.length>1?'s':''}`;
-      last.critiqueKey = worst==='high' ? 'crit' : worst==='medium' ? 'high' : 'med';
+      let key = worst==='high' ? 'crit' : worst==='medium' ? 'high' : 'med';
+      if(hasContradicted) key = 'crit';
+      const flagCount = critique.flags.length;
+      const citeIssueCount = critique.citation_checks.filter(c=>c.status!=='confirmed').length;
+      const parts = [];
+      if(flagCount) parts.push(`${flagCount} flag${flagCount>1?'s':''}`);
+      if(citeIssueCount) parts.push(`${citeIssueCount} cite issue${citeIssueCount>1?'s':''}`);
+      last.critiqueLabel = parts.join(', ') || 'Reviewed';
+      last.critiqueKey = key;
     }
     renderRegister();
   }
