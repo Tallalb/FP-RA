@@ -473,7 +473,7 @@ function repairTruncatedJson(text){
   return s;
 }
 
-async function requestConsultant(systemPromptBase, userMsg, extraStrict){
+async function requestConsultant(systemPromptBase, userMsg, extraStrict, model){
   const systemPrompt = systemPromptBase + (extraStrict ? "\n\nYour previous attempt was too long and got cut off. Be even more terse this time -- half the word counts above." : "");
   const messages = [{role:"user", content: userMsg}];
 
@@ -487,13 +487,13 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict){
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true"
       },
-      body: JSON.stringify({model:"claude-sonnet-5", max_tokens:2000, system:systemPrompt, messages})
+      body: JSON.stringify({model:model, max_tokens:2000, system:systemPrompt, messages})
     });
   }else{
     response = await fetch("/api/consultant", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({system:systemPrompt, messages, max_tokens:2000})
+      body: JSON.stringify({system:systemPrompt, messages, max_tokens:2000, model:model})
     }).catch(()=>{
       throw new Error("No API key set, and no server-side proxy available. Enter your Anthropic API key above.");
     });
@@ -511,13 +511,16 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict){
   return {clean, truncated};
 }
 
-async function callConsultant(systemPromptBase, userMsg){
-  let {clean, truncated} = await requestConsultant(systemPromptBase, userMsg, false);
+const FIRE_CONSULTANT_MODEL = "claude-opus-4-8";
+const INSURANCE_CONSULTANT_MODEL = "claude-sonnet-5";
+
+async function callConsultant(systemPromptBase, userMsg, model){
+  let {clean, truncated} = await requestConsultant(systemPromptBase, userMsg, false, model);
   try{
     return JSON.parse(clean);
   }catch(e){
     if(truncated){
-      const retry = await requestConsultant(systemPromptBase, userMsg, true);
+      const retry = await requestConsultant(systemPromptBase, userMsg, true, model);
       try{
         return JSON.parse(retry.clean);
       }catch(e2){
@@ -617,7 +620,8 @@ async function handleInsuranceRequest(){
   try{
     const insResult = await callConsultant(
       buildInsuranceSystemPrompt(currentPayload),
-      buildInsuranceUserMsg(currentPayload, currentFireResult)
+      buildInsuranceUserMsg(currentPayload, currentFireResult),
+      INSURANCE_CONSULTANT_MODEL
     );
     renderInsuranceResults(insResult);
   }catch(err){
@@ -715,7 +719,7 @@ document.getElementById('submitBtn').addEventListener('click', async ()=>{
   document.getElementById('resultsContent').innerHTML = `<div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Consultant agent is analyzing the deviation against ${jurisdictionLabel[payload.jurisdiction]} code framework...</div>`;
 
   try{
-    const result = await callConsultant(buildSystemPrompt(payload), buildUserMsg(payload));
+    const result = await callConsultant(buildSystemPrompt(payload), buildUserMsg(payload), FIRE_CONSULTANT_MODEL);
     renderResults(payload, result);
   }catch(err){
     document.getElementById('resultsContent').innerHTML = `<div class="error">Consultant agent call failed: ${escapeHtml(err.message)}. Try again.</div>`;
