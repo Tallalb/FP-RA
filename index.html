@@ -227,7 +227,7 @@
     <div id="registerEmpty" class="empty" style="padding:16px 0;">Register is empty.</div>
     <table class="register" id="registerTable" style="display:none;">
       <thead>
-        <tr><th>#</th><th>System / subsystem</th><th>Jurisdiction</th><th>Current risk</th><th>Best mitigation path</th><th>Residual risk</th></tr>
+        <tr><th>#</th><th>System / subsystem</th><th>Jurisdiction</th><th>Current risk</th><th>Best mitigation path</th><th>Residual risk</th><th>Zurich insurability</th></tr>
       </thead>
       <tbody id="registerBody"></tbody>
     </table>
@@ -287,7 +287,16 @@ const jurisdictionLabel = {
   'qatar':'Qatar', 'nfpa-only':'NFPA baseline'
 };
 
+const systemNfpaMap = {
+  'Passive Fire Protection': "NFPA 221 (fire walls/barriers), NFPA 5000 or NFPA 101 compartmentation and fire resistance rating requirements, NFPA 80 (fire doors and openings), NFPA 90A (smoke/fire dampers in air-handling).",
+  'Active Fire Protection': "NFPA 13 (sprinkler system design), NFPA 14 (standpipes), NFPA 20 (fire pumps), NFPA 25 (inspection, testing and maintenance of water-based systems), NFPA 2001 (clean agent suppression), NFPA 96 (kitchen suppression) if applicable.",
+  'Fire Alarm': "NFPA 72 (National Fire Alarm and Signaling Code) -- detection, notification, and ITM requirements.",
+  'Life Safety / Egress': "NFPA 101 (Life Safety Code) -- means of egress, occupant load, travel distance, and emergency lighting/signage requirements."
+};
+
 let register = [];
+let currentPayload = null;
+let currentFireResult = null;
 
 function riskBand(score){
   if(score<=4) return {key:'low', label:'Low'};
@@ -316,6 +325,17 @@ function renderMatrix(l, c, containerId, label){
 
 function badgeClass(key){ return 'tag-'+key; }
 
+function insurabilityKeyToBandKey(rating){
+  if(rating==='acceptable') return 'low';
+  if(rating==='acceptable_with_conditions') return 'med';
+  return 'crit';
+}
+function insurabilityLabel(rating){
+  if(rating==='acceptable') return 'Acceptable';
+  if(rating==='acceptable_with_conditions') return 'Acceptable w/ conditions';
+  return 'Not acceptable';
+}
+
 function buildSystemPrompt(payload){
   const context = jurisdictionContext[payload.jurisdiction];
   return `You are a fire protection consultant with deep expertise in NFPA standards and the following local regulatory framework:
@@ -339,7 +359,7 @@ You will be given a single code deviation in a building's fire protection system
     }
   ],
   "recommendation": string,
-  "verification_note": string
+  "verification_note": string (empty string "" if nothing beyond standard code adherence needs confirming)
 }
 
 STRICT LENGTH LIMITS -- keep this focused and scannable, not padded:
@@ -349,7 +369,7 @@ STRICT LENGTH LIMITS -- keep this focused and scannable, not padded:
 - 2 to 3 mitigation_options, at least one code_required_fix and one performance_based_alternative if both are realistic
 - each option's description: max 35 words
 - recommendation: max 30 words
-- verification_note: max 20 words
+- verification_note: max 20 words, and ONLY include one if there is something specific an AHJ needs to confirm -- a performance-based alternative requiring formal AHJ approval, an ambiguous or conflicting local amendment, a point resting on engineering judgment rather than a clear prescriptive rule, or a recently-changed code provision. If the recommended path is a straightforward code-required fix with no real ambiguity, return "" (empty string) rather than a generic reminder to check with the AHJ.
 
 Reference NFPA and local code sections by number only -- never reproduce verbatim code text. Ground residual risk estimates conservatively relative to the current likelihood ${payload.likelihood} and consequence ${payload.consequence}. Output compact JSON with no extra whitespace or line breaks between fields.`;
 }
@@ -363,6 +383,72 @@ Occupancy type: ${payload.occupancy}
 Building context: ${payload.buildctx || 'not specified'}
 Current likelihood rating: ${payload.likelihood} (${likelihoodHints[payload.likelihood]})
 Current consequence rating: ${payload.consequence} (${consequenceHints[payload.consequence]})`;
+}
+
+function buildInsuranceSystemPrompt(payload){
+  const context = jurisdictionContext[payload.jurisdiction];
+  const nfpaHint = systemNfpaMap[payload.system] || "the NFPA standard(s) that govern this system.";
+  return `You are a fire protection engineer working as a risk consultant for Zurich Insurance, evaluating a property risk submission from an insurer's perspective -- not a code official's.
+
+You will be given: (1) a fire protection code deviation as submitted by the client's fire consultant, and (2) the mitigation options that consultant already proposed, checked for code compliance against this local regulatory framework:
+
+${context}
+
+Local code compliance is not your basis for the insurability rating -- Zurich underwriting is grounded in NFPA standards regardless of local jurisdiction. Assume the code path and reference labeling from the fire consultant is accurate; do not re-check it. Instead, rate each proposed mitigation option purely on whether Zurich would consider it an ACCEPTABLE RISK to insure.
+
+The submitted deviation falls under System: "${payload.system}", Subsystem: "${payload.subsystem}". Ground every nfpa_reference in the standard(s) that actually govern THIS system and subsystem, not a generic fire-code citation. For this system, the governing standards are typically: ${nfpaHint} If the subsystem detail points to a more specific standard within that family (e.g. a hazard-specific suppression standard, or a component-specific ITM chapter), cite that specific one rather than the general system standard. Consider probable maximum loss exposure, reliance on active systems Zurich would want tested and maintained per the relevant NFPA ITM standard, typical loss history for this class of deviation, and any conditions Zurich would attach to keep the risk insurable.
+
+Respond with ONLY a raw JSON object -- no markdown fences, no preamble, matching exactly this schema:
+
+{
+  "insurer_overview": string,
+  "option_ratings": [
+    {
+      "option": string (must exactly match one of the option names given to you),
+      "insurability_rating": "acceptable" or "acceptable_with_conditions" or "not_acceptable",
+      "nfpa_reference": string (the specific NFPA standard(s) and section this rating is grounded in, number only, e.g. "NFPA 25 Ch. 5" -- use "none directly applicable" only if genuinely no NFPA standard governs this option),
+      "rationale": string,
+      "insurer_conditions": string,
+      "premium_impact": string
+    }
+  ],
+  "overall_recommendation": string
+}
+
+STRICT LENGTH LIMITS -- keep this focused and scannable, not padded:
+- insurer_overview: max 30 words
+- nfpa_reference per option: max 12 words, standard/section numbers only
+- rationale per option: max 35 words
+- insurer_conditions per option: max 25 words (use "none" if no conditions apply, otherwise ground conditions in the cited NFPA standard's inspection/testing/maintenance requirements where relevant)
+- premium_impact per option: max 15 words, qualitative only (e.g. "likely surcharge", "neutral", "may support current rate") -- never invent specific percentages or dollar figures
+- overall_recommendation: max 30 words
+
+Never reproduce verbatim NFPA or code text -- reference standard and section numbers only. Output compact JSON with no extra whitespace or line breaks between fields.`;
+}
+
+function buildInsuranceUserMsg(payload, fireResult){
+  const optionsText = (fireResult.mitigation_options || []).map((o, i) =>
+    `Option ${i+1}: ${o.option}
+  Path: ${o.code_path}
+  Description: ${o.description}
+  Code reference: ${o.code_reference}
+  Residual risk as assessed by fire consultant: L${o.residual_likelihood} x C${o.residual_consequence}`
+  ).join('\n\n');
+
+  return `System: ${payload.system}
+Subsystem: ${payload.subsystem}
+Deviation description: ${payload.description}
+Occupancy type: ${payload.occupancy}
+Building context: ${payload.buildctx || 'not specified'}
+Current (pre-mitigation) likelihood x consequence: ${payload.likelihood} x ${payload.consequence}
+
+Fire consultant's deviation summary: ${fireResult.deviation_summary}
+
+Fire consultant's proposed mitigation options:
+
+${optionsText}
+
+Rate each of these options' insurability for Zurich.`;
 }
 
 function repairTruncatedJson(text){
@@ -387,9 +473,9 @@ function repairTruncatedJson(text){
   return s;
 }
 
-async function requestConsultant(payload, extraStrict){
-  const systemPrompt = buildSystemPrompt(payload) + (extraStrict ? "\n\nYour previous attempt was too long and got cut off. Be even more terse this time -- half the word counts above." : "");
-  const messages = [{role:"user", content: buildUserMsg(payload)}];
+async function requestConsultant(systemPromptBase, userMsg, extraStrict){
+  const systemPrompt = systemPromptBase + (extraStrict ? "\n\nYour previous attempt was too long and got cut off. Be even more terse this time -- half the word counts above." : "");
+  const messages = [{role:"user", content: userMsg}];
 
   let response;
   if(sessionApiKey){
@@ -425,13 +511,13 @@ async function requestConsultant(payload, extraStrict){
   return {clean, truncated};
 }
 
-async function callConsultant(payload){
-  let {clean, truncated} = await requestConsultant(payload, false);
+async function callConsultant(systemPromptBase, userMsg){
+  let {clean, truncated} = await requestConsultant(systemPromptBase, userMsg, false);
   try{
     return JSON.parse(clean);
   }catch(e){
     if(truncated){
-      const retry = await requestConsultant(payload, true);
+      const retry = await requestConsultant(systemPromptBase, userMsg, true);
       try{
         return JSON.parse(retry.clean);
       }catch(e2){
@@ -445,6 +531,8 @@ async function callConsultant(payload){
 }
 
 function renderResults(payload, result){
+  currentPayload = payload;
+  currentFireResult = result;
   const currentScore = payload.likelihood * payload.consequence;
   const currentBand = riskBand(currentScore);
   if(!Array.isArray(result.mitigation_options)) result.mitigation_options = [];
@@ -490,21 +578,86 @@ function renderResults(payload, result){
       ${optsHtml}
       <h3 style="margin-top:14px;">Consultant recommendation</h3>
       <p>${escapeHtml(result.recommendation)}</p>
-      <div class="verify"><b>Verify with AHJ:</b> ${escapeHtml(result.verification_note)}</div>
+      ${result.verification_note ? `<div class="verify"><b>Verify with AHJ:</b> ${escapeHtml(result.verification_note)}</div>` : ''}
+    </div>
+    <div class="card" id="insuranceCard">
+      <h3>Insurance risk rating</h3>
+      <p style="color:var(--text-dim); font-size:12px;">Hand these proposed options to a Zurich Insurance fire protection risk consultant for an insurability rating.</p>
+      <button class="primary" id="insuranceBtn" style="margin-top:8px;" ${result.mitigation_options.length ? '' : 'disabled'}>Get Zurich insurance risk rating</button>
+      <div id="insuranceResults" style="margin-top:12px;"></div>
     </div>
   `;
   document.getElementById('resultsContent').innerHTML = html;
   document.getElementById('resultsContent').style.display = 'block';
   document.getElementById('emptyState').style.display = 'none';
+  const insBtn = document.getElementById('insuranceBtn');
+  if(insBtn) insBtn.addEventListener('click', handleInsuranceRequest);
 
   register.push({
     system: payload.system, subsystem: payload.subsystem,
     jurisdiction: jurisdictionLabel[payload.jurisdiction],
     currentScore, currentBand,
     bestOption: best ? best.option : '-', bestPath: best ? best.code_path : '-',
-    bestScore, bestBand
+    bestScore, bestBand,
+    insurability: null, insurabilityKey: null
   });
   renderRegister();
+}
+
+async function handleInsuranceRequest(){
+  if(!sessionApiKey){
+    alert('Set your Anthropic API key above first (it stays in this tab only, never saved).');
+    return;
+  }
+  if(!currentPayload || !currentFireResult) return;
+  const btn = document.getElementById('insuranceBtn');
+  const target = document.getElementById('insuranceResults');
+  btn.disabled = true; btn.textContent = 'Rating with Zurich consultant...';
+  target.innerHTML = `<div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Insurance consultant is rating the proposed mitigation options...</div>`;
+  try{
+    const insResult = await callConsultant(
+      buildInsuranceSystemPrompt(currentPayload),
+      buildInsuranceUserMsg(currentPayload, currentFireResult)
+    );
+    renderInsuranceResults(insResult);
+  }catch(err){
+    target.innerHTML = `<div class="error">Insurance consultant call failed: ${escapeHtml(err.message)}. Try again.</div>`;
+  }finally{
+    btn.disabled = false; btn.textContent = 'Get Zurich insurance risk rating';
+  }
+}
+
+function renderInsuranceResults(result){
+  if(!Array.isArray(result.option_ratings)) result.option_ratings = [];
+
+  const ratingsHtml = result.option_ratings.map(r=>`
+    <div class="opt" style="border-left-color:var(--accent-dim);">
+      <div class="opt-head"><b>${escapeHtml(r.option)}</b><span class="risk-tag ${badgeClass(insurabilityKeyToBandKey(r.insurability_rating))}">${insurabilityLabel(r.insurability_rating)}</span></div>
+      <div class="ref">${escapeHtml(r.nfpa_reference)}</div>
+      <p>${escapeHtml(r.rationale)}</p>
+      <div class="hint"><b>Zurich conditions:</b> ${escapeHtml(r.insurer_conditions)}</div>
+      <div class="hint"><b>Premium impact:</b> ${escapeHtml(r.premium_impact)}</div>
+    </div>
+  `).join('');
+
+  const html = `
+    <h3>Zurich insurance consultant assessment</h3>
+    <p>${escapeHtml(result.insurer_overview)}</p>
+    ${ratingsHtml}
+    <h3 style="margin-top:14px;">Overall recommendation</h3>
+    <p>${escapeHtml(result.overall_recommendation)}</p>
+  `;
+  document.getElementById('insuranceResults').innerHTML = html;
+
+  if(register.length){
+    const last = register[register.length-1];
+    const match = result.option_ratings.find(r=>r.option===last.bestOption);
+    if(match){
+      last.insurability = insurabilityLabel(match.insurability_rating);
+      last.insurabilityKey = insurabilityKeyToBandKey(match.insurability_rating);
+    }
+    renderRegister();
+  }
 }
 
 function renderRegister(){
@@ -525,6 +678,7 @@ function renderRegister(){
       <td><span class="risk-tag ${badgeClass(r.currentBand.key)}">${r.currentScore} &middot; ${r.currentBand.label}</span></td>
       <td>${escapeHtml(r.bestOption)}</td>
       <td>${r.bestScore!==null ? `<span class="risk-tag ${badgeClass(r.bestBand.key)}">${r.bestScore} &middot; ${r.bestBand.label}</span>` : '-'}</td>
+      <td>${r.insurability ? `<span class="risk-tag ${badgeClass(r.insurabilityKey)}">${escapeHtml(r.insurability)}</span>` : '<span style="color:var(--text-faint)">not rated</span>'}</td>
     </tr>
   `).join('');
 }
@@ -561,7 +715,7 @@ document.getElementById('submitBtn').addEventListener('click', async ()=>{
   document.getElementById('resultsContent').innerHTML = `<div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Consultant agent is analyzing the deviation against ${jurisdictionLabel[payload.jurisdiction]} code framework...</div>`;
 
   try{
-    const result = await callConsultant(payload);
+    const result = await callConsultant(buildSystemPrompt(payload), buildUserMsg(payload));
     renderResults(payload, result);
   }catch(err){
     document.getElementById('resultsContent').innerHTML = `<div class="error">Consultant agent call failed: ${escapeHtml(err.message)}. Try again.</div>`;
