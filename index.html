@@ -459,6 +459,76 @@ ${optionsText}
 Rate each of these options' insurability for Zurich.`;
 }
 
+function buildLifeSafetySystemPrompt(payload){
+  const context = jurisdictionContext[payload.jurisdiction];
+  const nfpaHint = systemNfpaMap[payload.system] || "the NFPA standard(s) that govern this system.";
+  return `You are an independent life safety expert consultant. You are brought in specifically for cases where the fire consultant's code-required fix is difficult or impractical to implement in an EXISTING building -- e.g. it would require demolition, major structural work, taking a live facility out of service, or spending disproportionate to the actual risk reduction gained. Your job is NOT to relitigate code compliance; assume the first consultant's code analysis is correct. Your job is to propose realistic interim or compensating risk mitigation and control measures, grounded in general fire protection industry practice and recognized standards (e.g. NFPA interim life safety measures concepts, fire watch programs, enhanced detection/notification, egress and signage improvements, staff training and fire drills, housekeeping/hazard reduction, portable suppression, compartmentation improvements short of full rebuilding), that reduce risk in the meantime or as a durable alternative when full code compliance is not achievable.
+
+Local regulatory framework in play: ${context}
+For this system ("${payload.system}" / "${payload.subsystem}"), the governing standards are typically: ${nfpaHint}
+
+Your absolute priority is occupant safety -- specifically, that occupants are able to recognize a fire and evacuate to a place of safety in time, even if the underlying deviation is not fully corrected. Every measure you propose should be evaluated against that standard, not just against reducing property loss.
+
+First, assess plainly whether the code-required fix already proposed is realistically a heavy lift in an existing, operating facility (structural demolition/rebuild, major shutdown, disproportionate cost) -- this is the scenario you exist for. If the proposed fix is actually straightforward, say so briefly and still provide your best compensating measures as a secondary safety net, but keep that assessment honest.
+
+Respond with ONLY a raw JSON object -- no markdown fences, no preamble, no commentary before or after -- matching exactly this schema:
+
+{
+  "feasibility_assessment": string,
+  "life_safety_priority_note": string,
+  "alternative_measures": [
+    {
+      "measure": string,
+      "description": string,
+      "basis": string,
+      "residual_likelihood": integer 1-5,
+      "residual_consequence": integer 1-5
+    }
+  ],
+  "occupant_evacuation_impact": string,
+  "recommendation": string
+}
+
+STRICT LENGTH LIMITS -- keep this focused and scannable, not padded:
+- feasibility_assessment: max 40 words, on whether the existing proposed fix is practically/financially heavy for an existing facility, and why
+- life_safety_priority_note: max 25 words, reaffirming how occupant evacuation is protected regardless of which path is chosen
+- 2 to 4 alternative_measures, ordered from most to least protective, each a genuinely distinct control (do not just restate the original fix in other words)
+- each measure's description: max 30 words
+- each measure's basis: max 15 words, naming the general practice or standard concept it draws on
+- occupant_evacuation_impact: max 30 words, specific to egress/notification/time-to-evacuate under these measures
+- recommendation: max 30 words
+
+These are compensating/interim measures, not a substitute for eventual code compliance -- do not imply they permanently waive the underlying code requirement. Ground residual risk estimates conservatively relative to the current likelihood ${payload.likelihood} and consequence ${payload.consequence}. Never reproduce verbatim code text. Output compact JSON with no extra whitespace or line breaks between fields.`;
+}
+
+function buildLifeSafetyUserMsg(payload, fireResult){
+  const optionsText = (fireResult.mitigation_options || []).map((o, i) =>
+    `Option ${i+1}: ${o.option}
+  Path: ${o.code_path}
+  Description: ${o.description}
+  Code reference: ${o.code_reference}
+  Residual risk as assessed by fire consultant: L${o.residual_likelihood} x C${o.residual_consequence}`
+  ).join('\n\n');
+
+  return `System: ${payload.system}
+Subsystem: ${payload.subsystem}
+Deviation description: ${payload.description}
+Occupancy type: ${payload.occupancy}
+Building context: ${payload.buildctx || 'not specified'}
+Current (pre-mitigation) likelihood x consequence: ${payload.likelihood} x ${payload.consequence}
+
+Fire consultant's deviation summary: ${fireResult.deviation_summary}
+Fire consultant's code gap analysis: ${fireResult.code_gap_analysis}
+
+Fire consultant's proposed mitigation options:
+
+${optionsText}
+
+Fire consultant's recommendation: ${fireResult.recommendation}
+
+Assess whether the code-required fix above is realistically achievable in this existing facility, and if it is a heavy lift (e.g. demolition/rebuilding, major shutdown, disproportionate cost), propose practical compensating or interim risk mitigation and control measures that keep occupants able to evacuate safely in the meantime.`;
+}
+
 function buildCriticSystemPrompt(payload){
   const context = jurisdictionContext[payload.jurisdiction];
   const nfpaHint = systemNfpaMap[payload.system] || "the NFPA standard(s) that govern this system.";
@@ -610,6 +680,7 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict, model, 
 const FIRE_CONSULTANT_MODEL = "claude-opus-4-8";
 const INSURANCE_CONSULTANT_MODEL = "claude-sonnet-5";
 const CRITIC_MODEL = "claude-haiku-4-5-20251001";
+const LIFE_SAFETY_MODEL = "claude-fable-5";
 const CRITIC_SEARCH_TOOLS = [{type:"web_search_20250305", name:"web_search", max_uses:6}];
 
 async function callConsultant(systemPromptBase, userMsg, model, tools){
@@ -681,6 +752,12 @@ function renderResults(payload, result){
       <p>${escapeHtml(result.recommendation)}</p>
       ${result.verification_note ? `<div class="verify"><b>Verify with AHJ:</b> ${escapeHtml(result.verification_note)}</div>` : ''}
     </div>
+    <div class="card" id="lifeSafetyCard">
+      <h3>Life safety expert &middot; alternative risk mitigation</h3>
+      <p style="color:var(--text-dim); font-size:12px;">If the code-required fix above is impractical in an existing facility (e.g. demolition/rebuilding), get compensating or interim control measures from a life safety expert, focused on keeping occupants able to evacuate safely.</p>
+      <button class="primary" id="lifeSafetyBtn" style="margin-top:8px;" ${result.mitigation_options.length ? '' : 'disabled'}>Ask Eirik</button>
+      <div id="lifeSafetyResults" style="margin-top:12px;"></div>
+    </div>
     <div class="card" id="criticCard">
       <h3>Consistency check <span style="color:var(--text-faint); font-weight:400; text-transform:none; letter-spacing:0;">&middot; independent second pass, web-search verified</span></h3>
       <div id="criticResults"><div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Searching to verify cited code references...</div></div>
@@ -697,6 +774,8 @@ function renderResults(payload, result){
   document.getElementById('emptyState').style.display = 'none';
   const insBtn = document.getElementById('insuranceBtn');
   if(insBtn) insBtn.addEventListener('click', handleInsuranceRequest);
+  const lsBtn = document.getElementById('lifeSafetyBtn');
+  if(lsBtn) lsBtn.addEventListener('click', handleLifeSafetyRequest);
 
   register.push({
     system: payload.system, subsystem: payload.subsystem,
@@ -858,6 +937,60 @@ function renderInsuranceResults(result){
     }
     renderRegister();
   }
+}
+
+async function handleLifeSafetyRequest(){
+  if(!sessionApiKey){
+    alert('Set your Anthropic API key above first (it stays in this tab only, never saved).');
+    return;
+  }
+  if(!currentPayload || !currentFireResult) return;
+  const btn = document.getElementById('lifeSafetyBtn');
+  const target = document.getElementById('lifeSafetyResults');
+  btn.disabled = true; btn.textContent = 'Eirik is reviewing...';
+  target.innerHTML = `<div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div> Eirik is assessing feasibility and drafting compensating measures...</div>`;
+  try{
+    const lsResult = await callConsultant(
+      buildLifeSafetySystemPrompt(currentPayload),
+      buildLifeSafetyUserMsg(currentPayload, currentFireResult),
+      LIFE_SAFETY_MODEL
+    );
+    renderLifeSafetyResults(lsResult);
+  }catch(err){
+    target.innerHTML = `<div class="error">Eirik's review failed: ${escapeHtml(err.message)}. Try again.</div>`;
+  }finally{
+    btn.disabled = false; btn.textContent = 'Ask Eirik';
+  }
+}
+
+function renderLifeSafetyResults(result){
+  if(!Array.isArray(result.alternative_measures)) result.alternative_measures = [];
+
+  const measuresHtml = result.alternative_measures.map(m=>{
+    const rScore = m.residual_likelihood * m.residual_consequence;
+    const rBand = riskBand(rScore);
+    return `<div class="opt path-alt">
+      <div class="opt-head"><b>${escapeHtml(m.measure)}</b><span class="opt-tag">${escapeHtml(m.basis)}</span></div>
+      <p>${escapeHtml(m.description)}</p>
+      <div class="residual-row">
+        <span>Residual L${m.residual_likelihood} &times; C${m.residual_consequence} = ${rScore}</span>
+        <span class="risk-tag ${badgeClass(rBand.key)}">${rBand.label}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  const html = `
+    <h3>Feasibility assessment</h3>
+    <p>${escapeHtml(result.feasibility_assessment)}</p>
+    <div class="hint" style="margin:-4px 0 10px;"><b>Occupant safety priority:</b> ${escapeHtml(result.life_safety_priority_note)}</div>
+    <h3>Compensating / interim measures</h3>
+    ${measuresHtml || '<p style="color:var(--text-faint)">No measures returned. Try again.</p>'}
+    <h3 style="margin-top:14px;">Occupant evacuation impact</h3>
+    <p>${escapeHtml(result.occupant_evacuation_impact)}</p>
+    <h3 style="margin-top:14px;">Recommendation</h3>
+    <p>${escapeHtml(result.recommendation)}</p>
+  `;
+  document.getElementById('lifeSafetyResults').innerHTML = html;
 }
 
 function renderRegister(){
