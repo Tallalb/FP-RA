@@ -10,13 +10,21 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { system, messages, max_tokens, model } = req.body || {};
+  const { system, messages, max_tokens, model, tools } = req.body || {};
   if (!system || !messages) {
     res.status(400).json({ error: 'Missing system or messages in request body' });
     return;
   }
 
   try {
+    const anthropicBody = {
+      model: model || 'claude-sonnet-5',
+      max_tokens: max_tokens || 2000,
+      system,
+      messages
+    };
+    if (tools) anthropicBody.tools = tools;
+
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -24,12 +32,7 @@ export default async function handler(req, res) {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({
-        model: model || 'claude-sonnet-5',
-        max_tokens: max_tokens || 2000,
-        system,
-        messages
-      })
+      body: JSON.stringify(anthropicBody)
     });
 
     const data = await anthropicRes.json();
