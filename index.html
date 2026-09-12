@@ -96,26 +96,6 @@
   .verify{font-size:11px; color:var(--text-faint); border-top:1px dashed var(--line-strong); margin-top:12px; padding-top:10px;}
   .verify b{color:var(--text-dim);}
   .clickable{cursor:pointer;}
-  .keybar{
-    display:flex; align-items:center; gap:10px; padding:10px 24px;
-    background:var(--surface-2); border-bottom:1px solid var(--line-strong);
-  }
-  .keybar-label{font-size:11px; color:var(--text-dim); white-space:nowrap;}
-  #apiKeyInput{
-    flex:1; max-width:340px; background:var(--surface); border:1px solid var(--line-strong);
-    color:var(--text); padding:6px 10px; border-radius:var(--radius); font-size:12px;
-    font-family:'IBM Plex Mono',monospace;
-  }
-  #apiKeyInput:focus{outline:1px solid var(--accent); border-color:var(--accent);}
-  .keybtn{
-    padding:6px 14px; background:var(--surface); border:1px solid var(--line-strong);
-    color:var(--text); border-radius:var(--radius); font-size:11px; text-transform:uppercase;
-    letter-spacing:0.04em; cursor:pointer;
-  }
-  .keybtn:hover{border-color:var(--accent); color:var(--accent);}
-  .keybar-status{font-size:11px; font-family:'IBM Plex Mono',monospace; white-space:nowrap;}
-  .keybar-status.set{color:var(--low);}
-  .keybar-status.unset{color:var(--text-faint);}
   .citecheck{border-left:2px solid var(--line-strong); padding:8px 0 8px 14px; margin-bottom:8px;}
   .citecheck.status-confirmed{border-left-color:var(--low);}
   .citecheck.status-unconfirmed{border-left-color:var(--med);}
@@ -138,13 +118,6 @@
       Prototype <span id="rev">rev.0</span><br>
       <span id="regcount">0</span> deviation(s) in register
     </div>
-  </div>
-
-  <div class="keybar" id="keybar">
-    <span class="keybar-label">Anthropic API key (session only, never saved or committed)</span>
-    <input type="password" id="apiKeyInput" placeholder="sk-ant-api03-...">
-    <button class="keybtn" id="setKeyBtn">Set key</button>
-    <span class="keybar-status" id="keyStatus">Not set</span>
   </div>
 
   <div class="body">
@@ -243,25 +216,6 @@
 </div>
 
 <script>
-let sessionApiKey = null;
-
-const keyInput = document.getElementById('apiKeyInput');
-const keyStatus = document.getElementById('keyStatus');
-document.getElementById('setKeyBtn').addEventListener('click', ()=>{
-  const val = keyInput.value.trim();
-  if(!val){
-    sessionApiKey = null;
-    keyStatus.textContent = 'Not set';
-    keyStatus.className = 'keybar-status unset';
-    return;
-  }
-  sessionApiKey = val;
-  keyInput.value = '';
-  keyInput.placeholder = 'Key set for this session';
-  keyStatus.textContent = 'Set (memory only)';
-  keyStatus.className = 'keybar-status set';
-});
-
 const likelihoodHints = {
   1:"Extremely unlikely to contribute to an incident.",
   2:"Would require an unusual combination of failures.",
@@ -642,27 +596,11 @@ async function requestConsultant(systemPromptBase, userMsg, extraStrict, model, 
   const requestBody = {model:model, max_tokens:maxTokens, system:systemPrompt, messages};
   if(tools) requestBody.tools = tools;
 
-  let response;
-  if(sessionApiKey){
-    response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": sessionApiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify(requestBody)
-    });
-  }else{
-    response = await fetch("/api/consultant", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(requestBody)
-    }).catch(()=>{
-      throw new Error("No API key set, and no server-side proxy available. Enter your Anthropic API key above.");
-    });
-  }
+  const response = await fetch("/api/consultant", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(requestBody)
+  });
 
   if(!response.ok){
     const errBody = await response.text();
@@ -902,10 +840,6 @@ function renderCriticResults(critique){
 }
 
 async function handleInsuranceRequest(){
-  if(!sessionApiKey){
-    alert('Set your Anthropic API key above first (it stays in this tab only, never saved).');
-    return;
-  }
   if(!currentPayload || !currentFireResult) return;
   const btn = document.getElementById('insuranceBtn');
   const target = document.getElementById('insuranceResults');
@@ -959,10 +893,6 @@ function renderInsuranceResults(result){
 }
 
 async function handleLifeSafetyRequest(){
-  if(!sessionApiKey){
-    alert('Set your Anthropic API key above first (it stays in this tab only, never saved).');
-    return;
-  }
   if(!currentPayload || !currentFireResult) return;
   const btn = document.getElementById('lifeSafetyBtn');
   const target = document.getElementById('lifeSafetyResults');
@@ -1055,10 +985,6 @@ document.getElementById('submitBtn').addEventListener('click', async ()=>{
   };
   if(!payload.description.trim()){
     alert('Enter a deviation description before checking with Vignesh.');
-    return;
-  }
-  if(!sessionApiKey){
-    alert('Set your Anthropic API key above first (it stays in this tab only, never saved).');
     return;
   }
   const btn = document.getElementById('submitBtn');
