@@ -11,7 +11,7 @@ const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 app.use(express.json());
 app.post("/api/consultant", consultantHandler);
-app.use(express.static(projectRoot));
+app.use(express.static(path.join(projectRoot, "public")));
 
 app.listen(port, host, () => {
   if (!process.env.ANTHROPIC_API_KEY) {
